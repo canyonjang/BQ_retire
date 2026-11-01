@@ -2,7 +2,9 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
 
-from bq_retire_questions import WEEK_DATA
+import bq_retire_questions
+
+WEEK_DATA = bq_retire_questions.WEEK_DATA
 
 st.set_page_config(page_title="BQ(retire) · 은퇴와 상속설계", page_icon="🎯", layout="wide")
 
@@ -237,7 +239,7 @@ if st.session_state.role == "student":
 
 else:
     st.subheader("교수 통제소")
-
+    st.caption(f"현재 불러온 주차: {available_weeks()}")
     weeks = available_weeks()
     if not weeks:
         st.error("bq_retire_questions.py에 등록된 주차가 없습니다.")
