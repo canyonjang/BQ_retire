@@ -239,7 +239,7 @@ if st.session_state.role == "student":
 
 else:
     st.subheader("교수 통제소")
-    st.caption(f"현재 불러온 주차: {available_weeks()}")
+
     weeks = available_weeks()
     if not weeks:
         st.error("bq_retire_questions.py에 등록된 주차가 없습니다.")
@@ -286,15 +286,78 @@ else:
             st.rerun()
 
     st.write("---")
+
     kind_text = "밸런스게임" if selected_item["type"] == "balance" else "퀴즈"
-    st.caption(f"{selected_week}주차 · {selected_idx + 1}번 · {kind_text} · 내부 ID {selected_item['id']}")
-    st.markdown(f"### {selected_item['q']}")
 
-    if selected_item["type"] == "balance":
-        st.info(selected_item["note"])
-    else:
-        st.info(f"정답: {selected_item['answer']} · {selected_item['explain']}")
+    st.caption(
+        f"{selected_week}주차 · {selected_idx + 1}번 · {kind_text} "
+        f"· 내부 ID {selected_item['id']}"
+    )
 
+    # ─────────────────────────────────────────
+    # 교수용 문항/정답 미리보기
+    # 기본 상태에서는 강의실 화면에 보이지 않음
+    # ─────────────────────────────────────────
+    preview_key = f"prof_preview_{selected_week}_{selected_item['id']}"
+    answer_key = f"prof_answer_{selected_week}_{selected_item['id']}"
+
+    c_preview, c_answer = st.columns(2)
+
+    with c_preview:
+        if st.button(
+            "👁 교수용 문항 보기"
+            if not st.session_state.get(preview_key, False)
+            else "🙈 교수용 문항 숨기기",
+            use_container_width=True,
+            key=f"btn_{preview_key}"
+        ):
+            st.session_state[preview_key] = not st.session_state.get(
+                preview_key, False
+            )
+            st.rerun()
+
+    with c_answer:
+        if selected_item["type"] == "quiz":
+            answer_label = (
+                "🔐 교수용 정답·해설 보기"
+                if not st.session_state.get(answer_key, False)
+                else "🙈 교수용 정답·해설 숨기기"
+            )
+        else:
+            answer_label = (
+                "🔐 교수용 코멘트 보기"
+                if not st.session_state.get(answer_key, False)
+                else "🙈 교수용 코멘트 숨기기"
+            )
+
+        if st.button(
+            answer_label,
+            use_container_width=True,
+            key=f"btn_{answer_key}"
+        ):
+            st.session_state[answer_key] = not st.session_state.get(
+                answer_key, False
+            )
+            st.rerun()
+
+    # 교수님이 문항 보기 버튼을 눌렀을 때만 표시
+    if st.session_state.get(preview_key, False):
+        st.markdown("#### 문항")
+        st.markdown(f"### {selected_item['q']}")
+
+        for option in selected_item["opt"]:
+            st.write(option)
+
+    # 교수님이 별도로 버튼을 눌렀을 때만 정답/코멘트 표시
+    if st.session_state.get(answer_key, False):
+
+        if selected_item["type"] == "quiz":
+            st.success(f"정답: {selected_item['answer']}")
+            st.info(selected_item["explain"])
+
+        else:
+            st.info(selected_item["note"])
+            
     df = item_responses(my_class, selected_week, selected_item["id"])
 
     if df.empty:
