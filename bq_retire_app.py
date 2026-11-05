@@ -59,6 +59,11 @@ def set_session(class_name: str, **kwargs):
     supabase.table(T_ACTIVE).upsert(row, on_conflict="class_name").execute()
 
 
+def all_sessions():
+    rows = supabase.table(T_ACTIVE).select("*").execute().data
+    return {r["class_name"]: r for r in rows}
+
+
 def active_classes():
     rows = supabase.table(T_ACTIVE).select("*").eq("is_open", True).execute().data
     return [r["class_name"] for r in rows]
@@ -121,34 +126,26 @@ if "role" not in st.session_state:
     role = st.radio("접속 유형", ["학생", "교수"], horizontal=True)
 
     if role == "학생":
-        name = st.text_input("이름")
-        if st.button("입장하기", type="primary"):
-            if not name.strip():
-                st.error("이름을 입력해주세요.")
-                st.stop()
+        active = active_classes()
 
-            active = active_classes()
-            if len(active) == 1:
-                cn = active[0]
-                add_student(cn, name.strip())
-                st.session_state.update(role="student", name=name.strip(), class_name=cn)
-                st.rerun()
-            elif len(active) == 0:
-                st.error("현재 열려 있는 강의실이 없습니다.")
-            else:
-                st.session_state["pending_name"] = name.strip()
-                st.session_state["choose_class"] = True
-                st.rerun()
+        if not active:
+            st.error("현재 열려 있는 강의실이 없습니다. 교수님이 세션을 열 때까지 기다려주세요.")
+        else:
+            # 분반은 항상 학생이 직접 고릅니다. 기본 선택값은 없습니다.
+            cn = st.radio("분반을 선택하세요", active, index=None)
+            name = st.text_input("이름")
 
-        if st.session_state.get("choose_class"):
-            cn = st.selectbox("열려 있는 분반", active_classes())
-            if st.button("이 분반으로 입장"):
-                nm = st.session_state.get("pending_name", "").strip()
-                add_student(cn, nm)
-                st.session_state.update(role="student", name=nm, class_name=cn)
-                st.session_state.pop("choose_class", None)
-                st.session_state.pop("pending_name", None)
-                st.rerun()
+            if st.button("입장하기", type="primary"):
+                if cn is None:
+                    st.error("분반을 선택해주세요.")
+                elif not name.strip():
+                    st.error("이름을 입력해주세요.")
+                else:
+                    add_student(cn, name.strip())
+                    st.session_state.update(
+                        role="student", name=name.strip(), class_name=cn
+                    )
+                    st.rerun()
 
     else:
         cn = st.selectbox("분반", CLASSES)
@@ -190,6 +187,8 @@ st.write("---")
 
 if st.session_state.role == "student":
     me = st.session_state.name
+
+    st.info(f"**{my_class}** 분반으로 접속 중입니다. 분반이 다르면 로그아웃 후 다시 입장해주세요.")
 
     if not is_open:
         st.info("교수님이 BQ 세션을 열 때까지 기다려주세요.")
@@ -240,6 +239,33 @@ if st.session_state.role == "student":
 else:
     st.subheader("교수 통제소")
 
+    # ─────────────────────────────────────────
+    # 분반 접속 현황
+    # 다른 분반이 열려 있으면 학생이 잘못 입장할 수 있습니다.
+    # ─────────────────────────────────────────
+    sess_map = all_sessions()
+    status_cols = st.columns(len(CLASSES))
+    for col, c in zip(status_cols, CLASSES):
+        opened = bool(sess_map.get(c, {}).get("is_open", False))
+        mark = "🟢 열림" if opened else "⚪ 닫힘"
+        col.write(f"**{c}** · {mark}" + ("  ← 현재 통제 중" if c == my_class else ""))
+
+    others_open = [
+        c for c in CLASSES
+        if c != my_class and bool(sess_map.get(c, {}).get("is_open", False))
+    ]
+    if others_open:
+        st.warning(
+            f"다른 분반이 열려 있습니다: {', '.join(others_open)}. "
+            "학생이 다른 분반으로 입장할 수 있습니다."
+        )
+        if st.button("🚪 다른 분반 모두 닫기", type="primary"):
+            for c in others_open:
+                set_session(c, is_open=False)
+            st.rerun()
+
+    st.write("---")
+
     weeks = available_weeks()
     if not weeks:
         st.error("bq_retire_questions.py에 등록된 주차가 없습니다.")
@@ -270,7 +296,11 @@ else:
 
     c1, c2, c3 = st.columns([3, 2, 2])
     with c1:
-        new_open = st.toggle("학생 접속", value=is_open)
+        # 토글은 누르는 즉시 DB에 반영됩니다.
+        new_open = st.toggle("학생 접속", value=is_open, key=f"toggle_open_{my_class}")
+        if bool(new_open) != is_open:
+            set_session(my_class, is_open=bool(new_open))
+            st.rerun()
     with c2:
         if st.button("✅ 주차·문항 적용", type="primary", use_container_width=True):
             set_session(
@@ -357,7 +387,7 @@ else:
 
         else:
             st.info(selected_item["note"])
-            
+
     df = item_responses(my_class, selected_week, selected_item["id"])
 
     if df.empty:
