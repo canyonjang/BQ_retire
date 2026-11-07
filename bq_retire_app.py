@@ -1,3 +1,5 @@
+import hashlib
+
 import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
@@ -120,6 +122,29 @@ def item_label(item_idx: int, item: dict) -> str:
     return f"{item_idx + 1}번 · {kind}"
 
 
+# variants 필드가 있는 문항에서만 사용합니다. 일반 문항의 처리는 변경하지 않습니다.
+# 이름·분반·문항 ID를 기반으로 조건을 안정적으로 배정합니다.
+# 같은 학생이 새로고침하거나 재접속해도 동일 조건이 표시됩니다.
+def assigned_variant(class_name: str, name: str, item: dict) -> str:
+    key = f"{class_name}|{name}|{item['id']}".encode("utf-8")
+    digest = hashlib.sha256(key).digest()
+    return "A" if digest[0] % 2 == 0 else "B"
+
+
+def encode_variant_response(variant: str, answer: str) -> str:
+    # 기존 Supabase 테이블 구조를 변경하지 않고 집단 정보를 함께 보관합니다.
+    return f"VARIANT_{variant}|{answer}"
+
+
+def decode_variant_response(response: str):
+    if response and response.startswith("VARIANT_") and "|" in response:
+        prefix, answer = response.split("|", 1)
+        variant = prefix.removeprefix("VARIANT_")
+        if variant in ("A", "B"):
+            return variant, answer
+    return None, response
+
+
 if "role" not in st.session_state:
     st.title("🎯 BQ(retire)")
     st.caption("은퇴와 상속설계 · LIVE 밸런스게임 & 퀴즈")
@@ -201,13 +226,16 @@ if st.session_state.role == "student":
     item = week_data[idx]
     st.caption(f"{week_no}주차 · {item_label(idx, item)}")
     st.subheader(item.get("title", "Checkpoint Quiz") if item["type"] == "balance" else "Checkpoint Quiz")
-    st.markdown(f"### {item['q']}")
+    variant = assigned_variant(my_class, me, item) if item.get("variants") else None
+    question = item["variants"][variant]["q"] if variant else item["q"]
+    st.markdown(f"### {question}")
 
     prev = my_response(my_class, week_no, me, item["id"])
 
     if prev:
         st.success("제출 완료")
-        st.write(f"내 응답: **{prev['response']}**")
+        _, displayed_response = decode_variant_response(prev["response"])
+        st.write(f"내 응답: **{displayed_response}**")
 
         if item["type"] == "quiz" and reveal:
             letter = answer_letter(prev["response"])
@@ -229,7 +257,8 @@ if st.session_state.role == "student":
                     score = 1.0 if item["type"] == "balance" else (
                         1.0 if answer_letter(ans) == item["answer"] else 0.0
                     )
-                    save_response(my_class, week_no, me, item, ans, score)
+                    stored_answer = encode_variant_response(variant, ans) if variant else ans
+                    save_response(my_class, week_no, me, item, stored_answer, score)
                     st.rerun()
 
     if st.button("🔄 다음 문항 확인", use_container_width=True):
@@ -373,7 +402,12 @@ else:
     # 교수님이 문항 보기 버튼을 눌렀을 때만 표시
     if st.session_state.get(preview_key, False):
         st.markdown("#### 문항")
-        st.markdown(f"### {selected_item['q']}")
+        if selected_item.get("variants"):
+            for group in ("A", "B"):
+                st.markdown(f"**{group}집단에 표시되는 질문**")
+                st.markdown(selected_item["variants"][group]["q"])
+        else:
+            st.markdown(f"### {selected_item['q']}")
 
         for option in selected_item["opt"]:
             st.write(option)
@@ -394,17 +428,43 @@ else:
         st.warning("아직 제출된 응답이 없습니다.")
     else:
         st.metric("응답 인원", f"{len(df)}명")
-        counts = df["response"].value_counts().reset_index()
-        counts.columns = ["응답", "인원"]
-        st.bar_chart(counts.set_index("응답"))
-
-        if selected_item["type"] == "quiz":
-            correct = int((df["score"] == 1.0).sum())
-            st.metric("정답률", f"{correct / len(df) * 100:.1f}%")
+        if selected_item.get("variants"):
+            # 실험형 밸런스게임: 집단별 구매 의향 비교. 집단 A/B와 선택 A/B는 별개입니다.
+            parsed = df["response"].apply(decode_variant_response)
+            experiment_df = pd.DataFrame(parsed.tolist(), columns=["집단", "선택"])
+            valid = experiment_df[experiment_df["집단"].isin(["A", "B"])].copy()
+            valid["구매"] = valid["선택"].fillna("").str.startswith("A:")
+            summary = []
+            for group in ("A", "B"):
+                grp = valid[valid["집단"] == group]
+                n = len(grp)
+                buyers = int(grp["구매"].sum())
+                summary.append({
+                    "집단": f"{group}집단",
+                    "응답 인원": n,
+                    "구매 인원": buyers,
+                    "비구매 인원": n - buyers,
+                    "구매율(%)": round(100 * buyers / n, 1) if n else None,
+                })
+            summary_df = pd.DataFrame(summary)
+            st.markdown("#### 조건별 구매 의향 비교")
+            st.dataframe(summary_df, hide_index=True, use_container_width=True)
+            st.bar_chart(summary_df.set_index("집단")[["구매 인원", "비구매 인원"]])
+            if len(valid) < len(df):
+                st.caption(f"집단 정보가 없는 기존 응답 {len(df) - len(valid)}건은 집단별 비교에서 제외했습니다.")
+            st.caption("집단 A는 단순 질문, 집단 B는 기회비용을 명시한 질문입니다. 구매율은 응답 인원 기준이며, 소규모 차이는 일반화할 수 없습니다.")
         else:
-            a = int(df["response"].str.startswith("A").sum())
-            b = int(df["response"].str.startswith("B").sum())
-            st.write(f"A {a}명 · B {b}명")
+            counts = df["response"].value_counts().reset_index()
+            counts.columns = ["응답", "인원"]
+            st.bar_chart(counts.set_index("응답"))
+
+            if selected_item["type"] == "quiz":
+                correct = int((df["score"] == 1.0).sum())
+                st.metric("정답률", f"{correct / len(df) * 100:.1f}%")
+            else:
+                a = int(df["response"].str.startswith("A").sum())
+                b = int(df["response"].str.startswith("B").sum())
+                st.write(f"A {a}명 · B {b}명")
 
     current_matches_selection = (selected_week == week_no and selected_idx == idx)
 
